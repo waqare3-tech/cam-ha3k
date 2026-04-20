@@ -4,44 +4,71 @@ const socketIo = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+const path = require('path');
 require('dotenv').config();
 
 const Message = require('./models/Message');
 
 const app = express();
 const server = http.createServer(app);
+
+// Dynamic CORS origin based on environment
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  'http://localhost:5500',
+  'http://localhost:3000',
+  'https://*.onrender.com',
+  'https://*.vercel.app'
+];
+
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5500",
-    credentials: true
-  }
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ["GET", "POST"]
+  },
+  // Important for Render deployment
+  transports: ['websocket', 'polling']
 });
 
 // Middleware
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:5500",
+  origin: allowedOrigins,
   credentials: true
 }));
 app.use(cookieParser());
 app.use(express.json());
 
-// Store active users and their socket IDs
-const activeUsers = new Map(); // username -> socket.id
-const userSockets = new Map(); // socket.id -> username
+// Serve static files in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../frontend')));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../frontend/index.html'));
+  });
+}
+
+// Store active users
+const activeUsers = new Map();
+const userSockets = new Map();
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chatapp';
+mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
-  useUnifiedTopology: true
+  useUnifiedTopology: true,
 }).then(() => {
   console.log('Connected to MongoDB');
 }).catch(err => {
   console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // REST API Routes
-
-// Get chat history between two users
 app.get('/api/messages/:user1/:user2', async (req, res) => {
   try {
     const { user1, user2 } = req.params;
@@ -60,7 +87,6 @@ app.get('/api/messages/:user1/:user2', async (req, res) => {
   }
 });
 
-// Get all messages for a user
 app.get('/api/messages/user/:username', async (req, res) => {
   try {
     const { username } = req.params;
@@ -79,7 +105,6 @@ app.get('/api/messages/user/:username', async (req, res) => {
   }
 });
 
-// Check if username exists
 app.post('/api/check-user', (req, res) => {
   const { username } = req.body;
   
@@ -95,38 +120,28 @@ app.post('/api/check-user', (req, res) => {
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
   
-  // Handle user login
   socket.on('user-login', (username) => {
-    // Check if username is already taken
     if (activeUsers.has(username)) {
       socket.emit('login-error', 'Username already taken');
       return;
     }
     
-    // Store user info
     activeUsers.set(username, socket.id);
     userSockets.set(socket.id, username);
-    
-    // Join user to their personal room for private messages
     socket.join(`user-${username}`);
     
-    // Send current active users to the new user
     const usersList = Array.from(activeUsers.keys());
     socket.emit('active-users', usersList);
-    
-    // Broadcast updated users list to all connected clients
     io.emit('user-joined', username);
     io.emit('active-users-update', usersList);
     
     console.log(`${username} logged in. Active users: ${usersList.length}`);
   });
   
-  // Handle public message
   socket.on('public-message', async (data) => {
     const { from, message } = data;
     const timestamp = new Date();
     
-    // Save to database
     const newMessage = new Message({
       from,
       to: 'public',
@@ -137,16 +152,12 @@ io.on('connection', (socket) => {
     
     try {
       await newMessage.save();
-      
-      // Broadcast to all users except sender
       socket.broadcast.emit('new-message', {
         from,
         message,
         timestamp,
         isPrivate: false
       });
-      
-      // Send confirmation to sender
       socket.emit('message-sent', {
         from,
         message,
@@ -159,12 +170,10 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle private message
   socket.on('private-message', async (data) => {
     const { from, to, message } = data;
     const timestamp = new Date();
     
-    // Save to database
     const newMessage = new Message({
       from,
       to,
@@ -176,7 +185,6 @@ io.on('connection', (socket) => {
     try {
       await newMessage.save();
       
-      // Send to recipient if online
       const recipientSocketId = activeUsers.get(to);
       if (recipientSocketId) {
         io.to(recipientSocketId).emit('private-message-received', {
@@ -187,7 +195,6 @@ io.on('connection', (socket) => {
         });
       }
       
-      // Send confirmation to sender
       socket.emit('private-message-sent', {
         to,
         message,
@@ -200,7 +207,6 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Load chat history
   socket.on('load-history', async (data) => {
     const { user1, user2 } = data;
     
@@ -219,7 +225,6 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Handle user disconnect
   socket.on('disconnect', () => {
     const username = userSockets.get(socket.id);
     
@@ -227,7 +232,6 @@ io.on('connection', (socket) => {
       activeUsers.delete(username);
       userSockets.delete(socket.id);
       
-      // Broadcast updated users list
       const usersList = Array.from(activeUsers.keys());
       io.emit('user-left', username);
       io.emit('active-users-update', usersList);
@@ -237,8 +241,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
